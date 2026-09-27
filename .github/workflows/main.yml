@@ -1,0 +1,130 @@
+name: Linux RDP Root
+
+on:
+  workflow_dispatch:
+
+jobs:
+  linux-rdp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Update System
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
+
+      - name: Install XFCE and XRDP
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            xfce4 \
+            xfce4-goodies \
+            xrdp \
+            xorgxrdp \
+            dbus-x11 \
+            dbus-x11
+
+          sudo systemctl enable xrdp
+          sudo systemctl restart xrdp
+
+      - name: Configure XRDP XFCE Session
+        run: |
+          sudo cp /etc/xrdp/startwm.sh /etc/xrdp/startwm.sh.bak
+
+          sudo tee /etc/xrdp/startwm.sh > /dev/null <<'EOF'
+          #!/bin/sh
+
+          unset DBUS_SESSION_BUS_ADDRESS
+          unset XDG_RUNTIME_DIR
+
+          export XDG_CURRENT_DESKTOP=XFCE
+          export XDG_SESSION_DESKTOP=xfce
+          export XDG_CONFIG_DIRS=/etc/xdg/xdg-xfce:/etc/xdg
+
+          exec startxfce4
+          EOF
+
+          sudo chmod +x /etc/xrdp/startwm.sh
+
+      - name: Configure Root Account
+        run: |
+          # Set root password
+          echo "root:root" | sudo chpasswd
+
+          # Allow root login
+          sudo passwd -u root
+
+          # XFCE session for root
+          echo "startxfce4" | sudo tee /root/.xsession
+
+          sudo mkdir -p /root/.config
+          sudo chown -R root:root /root/.config /root/.xsession
+
+      - name: Allow Root XRDP Login
+        run: |
+          # Configure XRDP PAM to allow root login
+          sudo cp /etc/pam.d/xrdp-sesman /etc/pam.d/xrdp-sesman.bak
+
+          # Restart services
+          sudo systemctl restart xrdp-sesman
+          sudo systemctl restart xrdp
+
+      - name: Verify XRDP
+        run: |
+          echo "Checking XRDP service..."
+
+          sudo systemctl status xrdp --no-pager || true
+
+          echo "Checking port 3389..."
+          sudo ss -tulpn | grep ':3389' || true
+
+      - name: Install Tailscale
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sudo sh
+
+      - name: Connect Tailscale
+        run: |
+          sudo tailscale up \
+            --authkey="${{ secrets.TAILSCALE_AUTH_KEY }}" \
+            --hostname="root-rdp-${{ github.run_id }}"
+
+          echo "Waiting for Tailscale IP..."
+
+          for i in {1..20}; do
+            TS_IP=$(tailscale ip -4 | head -n 1)
+
+            if [ -n "$TS_IP" ]; then
+              echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
+              echo "Tailscale IP: $TS_IP"
+              exit 0
+            fi
+
+            sleep 5
+          done
+
+          echo "Tailscale IP not assigned!"
+          exit 1
+
+      - name: Show RDP Details
+        run: |
+          echo ""
+          echo "======================================"
+          echo "          ROOT LINUX RDP READY"
+          echo "======================================"
+          echo ""
+          echo "IP       : $TAILSCALE_IP"
+          echo "PORT     : 3389"
+          echo "USERNAME : root"
+          echo "PASSWORD : root"
+          echo ""
+          echo "Desktop  : XFCE4"
+          echo "Access   : Tailscale Only"
+          echo ""
+          echo "======================================"
+
+      - name: Keep RDP Active
+        run: |
+          while true; do
+            echo "[$(date)] Root RDP is active..."
+            sleep 300
+          done
